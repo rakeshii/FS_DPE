@@ -1,0 +1,12 @@
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+tests/
+.env
+.gitignore
+*.md
+uploads/
+outputs/
+nixpacks.toml
+build.sh
