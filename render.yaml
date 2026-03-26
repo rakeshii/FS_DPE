@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: finstatement-projector
+    env: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
