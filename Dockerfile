@@ -29,7 +29,4 @@ RUN mkdir -p /tmp/fsproj_uploads /tmp/fsproj_outputs
 EXPOSE 8080
 
 # ── Start ────────────────────────────────────────────────────────────────────
-CMD gunicorn wsgi:app \
-        --bind 0.0.0.0:${PORT:-8080} \
-        --timeout 120 \
-        --workers 2
+CMD ["/bin/sh", "-c", "gunicorn wsgi:app --bind 0.0.0.0:${PORT:-8080} --timeout 120 --workers 2"]
