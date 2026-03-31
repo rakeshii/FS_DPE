@@ -1,9 +1,3 @@
-"""
-FinStatement Projector — FY 2025-26
-NSVR & Associates LLP
-Developer Version
-"""
-
 import os, sys
 # Guarantee that routes/, core/, config.py are always importable
 # regardless of which directory gunicorn/Docker launches from
