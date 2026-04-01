@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FS Year Rollover</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: #f0f2f5;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 4px 24px rgba(0,0,0,.10);
+      width: 100%;
+      max-width: 560px;
+      padding: 40px 44px 36px;
+    }
+
+    h1 {
+      font-size: 1.45rem;
+      font-weight: 700;
+      color: #1a1a2e;
+      margin-bottom: 4px;
+    }
+    .subtitle {
+      font-size: .88rem;
+      color: #6b7280;
+      margin-bottom: 28px;
+    }
+
+    /* LibreOffice status badge */
+    #lo-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: .80rem;
+      padding: 4px 10px;
+      border-radius: 20px;
+      margin-bottom: 24px;
+      font-weight: 500;
+    }
+    #lo-status.ok   { background: #d1fae5; color: #065f46; }
+    #lo-status.warn { background: #fef3c7; color: #92400e; }
+    #lo-status.err  { background: #fee2e2; color: #991b1b; }
+    #lo-status .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+
+    /* Drop zone */
+    .drop-zone {
+      border: 2px dashed #d1d5db;
+      border-radius: 8px;
+      padding: 32px 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color .2s, background .2s;
+      margin-bottom: 20px;
+      position: relative;
+    }
+    .drop-zone:hover, .drop-zone.drag-over {
+      border-color: #4f46e5;
+      background: #eef2ff;
+    }
+    .drop-zone input[type="file"] {
+      position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+    }
+    .drop-zone .icon { font-size: 2rem; margin-bottom: 8px; }
+    .drop-zone p { font-size: .88rem; color: #6b7280; }
+    .drop-zone .file-name {
+      margin-top: 8px;
+      font-size: .85rem;
+      color: #4f46e5;
+      font-weight: 600;
+      word-break: break-all;
+    }
+
+    /* Form fields */
+    .field { margin-bottom: 16px; }
+    label {
+      display: block;
+      font-size: .82rem;
+      font-weight: 600;
+      color: #374151;
+      margin-bottom: 5px;
+    }
+    input[type="text"] {
+      width: 100%;
+      padding: 9px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font-size: .9rem;
+      color: #111827;
+      transition: border-color .2s;
+      outline: none;
+    }
+    input[type="text"]:focus { border-color: #4f46e5; box-shadow: 0 0 0 3px rgba(79,70,229,.12); }
+
+    /* Radio group */
+    .radio-group {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .radio-group label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-weight: 400;
+      color: #374151;
+      cursor: pointer;
+      font-size: .88rem;
+    }
+    .radio-group input[type="radio"] { accent-color: #4f46e5; }
+
+    /* Submit button */
+    .btn {
+      width: 100%;
+      padding: 12px;
+      background: #4f46e5;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 8px;
+      transition: background .2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .btn:hover:not(:disabled) { background: #4338ca; }
+    .btn:disabled { background: #a5b4fc; cursor: not-allowed; }
+
+    /* Spinner */
+    .spinner {
+      width: 18px; height: 18px;
+      border: 3px solid rgba(255,255,255,.4);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      display: none;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Alert */
+    .alert {
+      margin-top: 16px;
+      padding: 12px 14px;
+      border-radius: 8px;
+      font-size: .87rem;
+      display: none;
+    }
+    .alert.error   { background: #fee2e2; color: #991b1b; }
+    .alert.success { background: #d1fae5; color: #065f46; }
+  </style>
+</head>
+<body>
+<div class="card">
+  <h1>FS Year Rollover</h1>
+  <p class="subtitle">Upload last year's workbook — get a three-year comparative draft instantly.</p>
+
+  <div id="lo-status" class="warn">
+    <span class="dot"></span> Checking LibreOffice…
+  </div>
+
+  <form id="upload-form" enctype="multipart/form-data">
+
+    <!-- File drop zone -->
+    <div class="drop-zone" id="drop-zone">
+      <input type="file" name="file" id="file-input" accept=".xls,.xlsx" required />
+      <div class="icon">📂</div>
+      <p>Drag &amp; drop your <strong>.xlsx</strong> workbook here<br>or click to browse</p>
+      <div class="file-name" id="file-name"></div>
+    </div>
+
+    <!-- New column header -->
+    <div class="field">
+      <label for="new_header">2026 column header</label>
+      <input type="text" id="new_header" name="new_header"
+             value="As at 31 March, 2026" placeholder="As at 31 March, 2026" />
+    </div>
+
+    <!-- Output filename -->
+    <div class="field">
+      <label for="output_name">Output filename</label>
+      <input type="text" id="output_name" name="output_name"
+             value="FS-FY_2025-26_Draft.xlsx" placeholder="FS-FY_2025-26_Draft.xlsx" />
+    </div>
+
+    <!-- 2026 column content -->
+    <div class="field">
+      <label>2026 column content</label>
+      <div class="radio-group">
+        <label>
+          <input type="radio" name="col_content" value="copy2025" checked />
+          Copy 2025 values (prior year comparison)
+        </label>
+        <label>
+          <input type="radio" name="col_content" value="blank" />
+          Leave blank (live formulas only)
+        </label>
+      </div>
+    </div>
+
+    <!-- Update title labels -->
+    <div class="field">
+      <label>Update year labels in headers</label>
+      <div class="radio-group">
+        <label>
+          <input type="radio" name="title_update" value="yes" checked />
+          Yes — update all year references
+        </label>
+        <label>
+          <input type="radio" name="title_update" value="no" />
+          No — keep original labels
+        </label>
+      </div>
+    </div>
+
+    <button type="submit" class="btn" id="submit-btn">
+      <span class="spinner" id="spinner"></span>
+      <span id="btn-label">Generate Rollover Workbook</span>
+    </button>
+  </form>
+
+  <div class="alert" id="alert"></div>
+</div>
+
+<script>
+  // ── LibreOffice status check ──────────────────────────────────────────────
+  fetch('/api/check')
+    .then(r => r.json())
+    .then(data => {
+      const el = document.getElementById('lo-status');
+      if (data.libreoffice) {
+        el.className = 'ok';
+        el.innerHTML = '<span class="dot"></span> LibreOffice ready';
+      } else {
+        el.className = 'warn';
+        el.innerHTML = '<span class="dot"></span> LibreOffice not found — formula recalculation disabled';
+      }
+    })
+    .catch(() => {
+      const el = document.getElementById('lo-status');
+      el.className = 'err';
+      el.innerHTML = '<span class="dot"></span> Status check failed';
+    });
+
+  // ── Drop zone feedback ────────────────────────────────────────────────────
+  const dropZone  = document.getElementById('drop-zone');
+  const fileInput = document.getElementById('file-input');
+  const fileLabel = document.getElementById('file-name');
+
+  fileInput.addEventListener('change', () => {
+    fileLabel.textContent = fileInput.files[0]?.name || '';
+  });
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    if (e.dataTransfer.files.length) {
+      fileInput.files = e.dataTransfer.files;
+      fileLabel.textContent = e.dataTransfer.files[0].name;
+    }
+  });
+
+  // ── Form submit → file download ───────────────────────────────────────────
+  document.getElementById('upload-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+
+    const btn     = document.getElementById('submit-btn');
+    const spinner = document.getElementById('spinner');
+    const label   = document.getElementById('btn-label');
+    const alert   = document.getElementById('alert');
+
+    // Reset state
+    alert.style.display = 'none';
+    btn.disabled = true;
+    spinner.style.display = 'block';
+    label.textContent = 'Generating…';
+
+    try {
+      const formData = new FormData(this);
+      const response = await fetch('/api/generate', { method: 'POST', body: formData });
+
+      if (response.ok) {
+        // Trigger browser file download
+        const blob = await response.blob();
+        const filename = document.getElementById('output_name').value || 'FS-FY_2025-26_Draft.xlsx';
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href     = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+
+        alert.className = 'alert success';
+        alert.textContent = 'Workbook generated successfully — check your downloads.';
+        alert.style.display = 'block';
+      } else {
+        const data = await response.json();
+        alert.className = 'alert error';
+        alert.textContent = 'Error: ' + (data.error || 'Unknown error');
+        alert.style.display = 'block';
+      }
+    } catch (err) {
+      alert.className = 'alert error';
+      alert.textContent = 'Network error — please try again.';
+      alert.style.display = 'block';
+    } finally {
+      btn.disabled = false;
+      spinner.style.display = 'none';
+      label.textContent = 'Generate Rollover Workbook';
+    }
+  });
+</script>
+</body>
+</html>
