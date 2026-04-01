@@ -21,6 +21,8 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 # ── Application code ─────────────────────────────────────────────────────────
 COPY . .
+# Explicit copy ensures templates are never lost to layer cache
+COPY templates/ ./templates/
 
 # ── Runtime temp directories ─────────────────────────────────────────────────
 RUN mkdir -p /tmp/fsproj_uploads /tmp/fsproj_outputs
