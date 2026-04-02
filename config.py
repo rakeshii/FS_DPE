@@ -55,6 +55,8 @@ class Config:
         ('Note 9-11',  2, 2, "=+'Note 8'!B4:E4"),
         ('Note 11-14', 2, 2, "=+'Note 9-11'!B2:E2"),
         ('Note 11-14', 3, 2, "=+'Note 9-11'!B3:E3"),
+        # BS D16: pre-shift formula so shift_formula produces ='Note 2'!E14
+        ('BS',        16, 4, "='Note 2'!D14"),
     ]
 
 

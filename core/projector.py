@@ -853,16 +853,29 @@ def rewrite_tb_formulas(wb, named_ranges_cfg, sheet_config):
         r'TB![$]?([BC])[$]?(\d+):[$]?([BC])[$]?(\d+)'
     )
     # Pattern 2: single-cell ref  TB!B175 or TB!$B$175
-    # Only match when NOT followed by a colon (to avoid partial range matches)
+    # Exclude when followed by ':' — that means it's the start of a range ref
+    # (range refs are handled entirely by TB_RANGE_PAT above)
     TB_CELL_PAT = re.compile(
-        r'TB![$]?([BC])[$]?(\d+)(?!:\d|[$]\d)'
+        r'TB![$]?([BC])[$]?(\d+)(?!:)'
     )
 
     def replace_range_ref(m):
         col1, r1, col2, r2 = m.group(1), int(m.group(2)), m.group(3), int(m.group(4))
+        # Try a pre-defined whole-range named range first
         name = range_to_name.get((r1, r2, col1))
         if name:
             return name
+        # Fall back: replace each endpoint individually where a named range exists,
+        # keeping the TB! prefix on any endpoint that has no named range so that
+        # Excel can still resolve the reference correctly.
+        start_name = row_to_name.get((r1, col1))
+        end_name   = row_to_name.get((r2, col2))
+        if start_name and end_name:
+            return f'{start_name}:{end_name}'
+        if start_name:
+            return f'{start_name}:TB!{col2}{r2}'
+        if end_name:
+            return f'TB!{col1}{r1}:{end_name}'
         return m.group(0)   # no named range - leave as-is
 
     def replace_cell_ref(m):
