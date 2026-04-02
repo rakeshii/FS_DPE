@@ -93,8 +93,13 @@ def generate_projection(input_path, output_path, sheet_config, chain_patches,
         for shname in wb.sheetnames:
             cfg = sheet_config.get(shname)
             if cfg:
-                width = cfg.get('width', 1)
-                if width == 2:
+                sheet_type = cfg.get('type', 'standard')
+                width      = cfg.get('width', 1)
+                if sheet_type == 'fixed_assets':
+                    # Fixed Assets Schedule: dedicated 5-column 2025-26 insertion.
+                    # Existing 2024-25 data stays as-is; new cols get live formulas.
+                    process_note8_sheet(wb[shname], sheet_config, new_header, update_titles)
+                elif width == 2:
                     # Wide sheet: insert 2 cols, 2026 gets No.of Shares + ₹ formula cols
                     process_wide_financial_sheet(wb[shname], shname, cfg['insert'],
                                                  sheet_config, new_header, update_titles)
@@ -776,6 +781,312 @@ def process_wide_financial_sheet(ws, shname, insert_col, sheet_config,
             copy_style(ws.cell(r, col_2025_amount), c26_amt)
             c26_amt.fill = PatternFill("solid", fgColor="FFFBEB")
             c26_amt.font = Font(size=9, color="856404")
+
+
+# ══════════════════════════════════════════════════════════════
+# PROCESS NOTE 8 - Fixed Assets Schedule (5 new 2025-26 columns)
+# ══════════════════════════════════════════════════════════════
+#
+# Input layout (1-indexed columns, per user's actual Note 8 template):
+#   A  B  | C        D        E        F      | G         H         I      | J       K
+#   labels | GB_open  Add_25   Dis_25   GB_25  | Dep_open  Dep_yr25  Dep_25 | NB_25  NB_24
+#
+# Output layout after adding 5 new 2025-26 columns:
+#   A  B  | C        D        E        F      G_new     H_new  | I        J        K      L_new     M_new | N_new | O      P
+#          | GB_open  Add_25   Dis_25   GB_25  Add_26    GB_26  | Dep_open Dep_yr25 Dep_25 Dep_yr26  Dep_26 | NB_26 | NB_25  NB_24
+#
+# Column mapping: original → final (after all 5 insertions)
+#   orig 7→9, 8→10, 9→11  (Dep section shifts +2, gross block adds 2 cols before it)
+#   orig 10→15, 11→16      (Net Block shifts +5, dep section adds 2 more cols before it)
+
+_N8_COL_MAP = {7: 9, 8: 10, 9: 11, 10: 15, 11: 16}
+
+def _n8_new_col(orig_c):
+    """Map an original Note 8 column index to its final index after all 5 insertions."""
+    if orig_c <= 6:   return orig_c
+    if orig_c <= 9:   return orig_c + 2   # G,H,I → I,J,K
+    if orig_c <= 11:  return orig_c + 5   # J,K  → O,P
+    return orig_c + 5                      # beyond K: also shift +5
+
+
+def _n8_remap_formula(formula, sheet_config):
+    """
+    Update a relocated Note 8 cell's formula:
+    - Same-sheet column refs remapped via _n8_new_col
+    - Cross-sheet refs shifted per each referenced sheet's insert config (same as shift_formula)
+    """
+    if not isinstance(formula, str) or not formula.startswith('='):
+        return formula
+
+    def _remap_same(m):
+        abs_c, col_ltr, row_part = m.group(1), m.group(2), m.group(3)
+        new_ltr = get_column_letter(_n8_new_col(column_index_from_string(col_ltr)))
+        return f"{abs_c}{new_ltr}{row_part}"
+
+    def _shift_cross(m):
+        ref_sh = m.group(1) or m.group(2)
+        abs1, col1, row1 = m.group(3), m.group(4), m.group(5)
+        abs2, col2, row2 = m.group(6), m.group(7), m.group(8)
+        pfx = f"'{ref_sh}'" if re.search(r"[ &\-]", ref_sh) else ref_sh
+        ri  = sheet_config.get(ref_sh, {}).get('insert')
+        if ri:
+            cn1 = column_index_from_string(col1)
+            if cn1 >= ri: col1 = get_column_letter(cn1 + 1)
+            if col2:
+                cn2 = column_index_from_string(col2)
+                if cn2 >= ri: col2 = get_column_letter(cn2 + 1)
+        if col2: return f"{pfx}!{abs1}{col1}{row1}:{abs2}{col2}{row2}"
+        return f"{pfx}!{abs1}{col1}{row1}"
+
+    result, last = [], 0
+    for m in FULL_RANGE_PAT.finditer(formula):
+        result.append(SAME_PAT.sub(_remap_same, formula[last:m.start()]))
+        result.append(_shift_cross(m))
+        last = m.end()
+    result.append(SAME_PAT.sub(_remap_same, formula[last:]))
+    return ''.join(result)
+
+
+# Matches a simple single-cell WDV Dep-IT reference: ='WDV Dep-IT'!C5
+_WDV_CELL_RE = re.compile(r"^=\+?'WDV Dep-IT'!(\$?)([A-Z]+)(\$?)(\d+)$", re.I)
+
+
+def _n8_next_wdv(formula):
+    """
+    If formula is a bare WDV Dep-IT cell ref (='WDV Dep-IT'!C5), shift its
+    column by +1 to derive the next year's ref (='WDV Dep-IT'!D5).
+    Returns None when the formula doesn't fit this pattern.
+    """
+    m = _WDV_CELL_RE.match(formula.strip())
+    if m:
+        abs1, col_ltr, abs2, row = m.groups()
+        new_ltr = get_column_letter(column_index_from_string(col_ltr) + 1)
+        return f"='WDV Dep-IT'!{abs1}{new_ltr}{abs2}{row}"
+    return None
+
+
+def _n8_sum_col(formula, src_ltr, dst_ltr):
+    """
+    Derive a SUM (or plain sum) formula for a new column by substituting the
+    source column letter with the destination column letter.
+    E.g. _n8_sum_col('=SUM(F5:F20)', 'F', 'H') → '=SUM(H5:H20)'
+    Only replaces standalone column refs followed immediately by a digit.
+    """
+    return re.sub(r'\b' + re.escape(src_ltr) + r'(?=\d)', dst_ltr, formula)
+
+
+def process_note8_sheet(ws, sheet_config, new_header, update_titles=True):
+    """
+    Fixed Assets Schedule (Note 8) — inserts 5 new FY 2025-26 columns.
+
+    New columns added:
+      G  Addition during the year (2025-26)         — derived from WDV Dep-IT
+      H  As at March 31, 2026 [Gross Block]         = F + G
+      L  Dep for the year 31.03.2026                — derived from WDV Dep-IT
+      M  Dep as at March 31, 2026                   = K + L
+      N  As at March 31, 2026 [Net Block]           = H - M
+    """
+    max_row      = ws.max_row
+    orig_max_col = ws.max_column
+
+    # ── 1. Unmerge everything, save merge data ────────────────────────────────────
+    saved_merges = []
+    for mr in list(ws.merged_cells.ranges):
+        saved_merges.append({
+            'min_row': mr.min_row, 'max_row': mr.max_row,
+            'min_col': mr.min_col, 'max_col': mr.max_col,
+            'val': ws.cell(mr.min_row, mr.min_col).value,
+        })
+    for mr in list(ws.merged_cells.ranges):
+        ws.unmerge_cells(str(mr))
+
+    # ── 2. Save column dimensions ─────────────────────────────────────────────────
+    orig_dims = {l: (d.width, d.hidden) for l, d in ws.column_dimensions.items()}
+
+    # ── 3. Snapshot all cells from col 7 onward (those that will be relocated) ────
+    snap = {}   # (r, orig_c) → (value, font, fill, border, alignment, number_format)
+    for c in range(7, orig_max_col + 1):
+        for r in range(1, max_row + 1):
+            cell = ws.cell(r, c)
+            snap[(r, c)] = (
+                cell.value,
+                copy.copy(cell.font)      if cell.has_style else None,
+                copy.copy(cell.fill)      if cell.has_style else None,
+                copy.copy(cell.border)    if cell.has_style else None,
+                copy.copy(cell.alignment) if cell.has_style else None,
+                cell.number_format        if cell.has_style else 'General',
+            )
+
+    # ── 4. Clear cols 7 onward (give room for 5 new cols) ────────────────────────
+    for c in range(7, orig_max_col + 6):
+        for r in range(1, max_row + 1):
+            ws.cell(r, c).value = None
+
+    # ── 5. Write snapshotted cells to their new positions with formula remapping ──
+    for (r, orig_c), (val, fnt, fil, brd, aln, nfmt) in snap.items():
+        new_c = _n8_new_col(orig_c)
+        if isinstance(val, str) and val.startswith('='):
+            val = _n8_remap_formula(val, sheet_config)
+        dst = ws.cell(r, new_c)
+        dst.value         = val
+        if fnt: dst.font      = fnt
+        if fil: dst.fill      = fil
+        if brd: dst.border    = brd
+        if aln: dst.alignment = aln
+        dst.number_format = nfmt or 'General'
+
+    # ── 6. Final column positions (1-indexed) ─────────────────────────────────────
+    C_GB_OPEN   = 3   # C  Gross Block 01.04.2024 (unchanged)
+    C_GB_ADD25  = 4   # D  Additions 2024-25 (unchanged)  — source for deriving col G
+    C_GB_DIS25  = 5   # E  Disposals 2024-25 (unchanged)
+    C_GB_25     = 6   # F  Gross Block 31.03.2025 (unchanged)
+    C_GB_ADD26  = 7   # G  [NEW] Additions during year 2025-26
+    C_GB_26     = 8   # H  [NEW] Gross Block as at 31.03.2026
+    C_DEP_OPEN  = 9   # I  Dep as at 01.04.2024      (was G)
+    C_DEP_YR25  = 10  # J  Dep for year 2024-25      (was H) — source for deriving col L
+    C_DEP_25    = 11  # K  Dep as at 31.03.2025       (was I)
+    C_DEP_YR26  = 12  # L  [NEW] Dep for the year 2025-26
+    C_DEP_26    = 13  # M  [NEW] Dep as at 31.03.2026
+    C_NB_26     = 14  # N  [NEW] Net Block as at 31.03.2026
+    C_NB_25     = 15  # O  Net Block as at 31.03.2025  (was J)
+    C_NB_24     = 16  # P  Net Block as at 31.03.2024  (was K)
+    fl = get_column_letter   # shorthand
+
+    # ── 7. Write headers + formulas for the 5 new columns ────────────────────────
+    for r in range(1, max_row + 1):
+
+        # Header rows: stamp column titles in the new cols
+        if _n8_is_hdr_row(ws, r):
+            _n8_hdr(ws, r, C_GB_ADD26, 'Addition during the year')
+            _n8_hdr(ws, r, C_GB_26,    new_header)
+            _n8_hdr(ws, r, C_DEP_YR26, 'Dep for the year 31.03.2026')
+            _n8_hdr(ws, r, C_DEP_26,   'Dep as at March 31, 2026')
+            _n8_hdr(ws, r, C_NB_26,    'As at March 31, 2026')
+            continue
+
+        gb25  = ws.cell(r, C_GB_25).value
+        dep25 = ws.cell(r, C_DEP_25).value
+        nb25  = ws.cell(r, C_NB_25).value
+
+        # Completely empty data rows: skip
+        if gb25 is None and dep25 is None and nb25 is None:
+            continue
+
+        # ── Col G: Additions during 2025-26 ─────────────────────────────────────
+        # Strategy: if col D (Add_25) references WDV Dep-IT with a bare cell ref,
+        # shift that WDV Dep-IT column by +1 to point to 2025-26 data.
+        # For SUM total rows: derive matching SUM formula for col G.
+        v_add25 = ws.cell(r, C_GB_ADD25).value
+        add26 = None
+        if isinstance(v_add25, str) and v_add25.startswith('='):
+            add26 = (_n8_next_wdv(v_add25)
+                     or (_n8_sum_col(v_add25, fl(C_GB_ADD25), fl(C_GB_ADD26))
+                         if 'SUM' in v_add25.upper() else None))
+        if add26:
+            c26 = ws.cell(r, C_GB_ADD26)
+            c26.value = add26
+            copy_style(ws.cell(r, C_GB_ADD25), c26)
+            c26.fill = PatternFill("solid", fgColor="FFFBEB")
+            c26.font = Font(size=9, color="856404")
+
+        # ── Col H: Gross Block as at 31.03.2026 = F + G ─────────────────────────
+        if gb25 is not None:
+            c26 = ws.cell(r, C_GB_26)
+            if isinstance(gb25, str) and 'SUM' in gb25.upper():
+                # Total row: sum the H column over the same row range as F
+                c26.value = _n8_sum_col(gb25, fl(C_GB_25), fl(C_GB_26))
+            else:
+                c26.value = f'={fl(C_GB_25)}{r}+{fl(C_GB_ADD26)}{r}'
+            copy_style(ws.cell(r, C_GB_25), c26)
+            c26.fill = PatternFill("solid", fgColor="FFFBEB")
+            c26.font = Font(size=9, color="856404")
+
+        # ── Col L: Dep for the year 2025-26 ─────────────────────────────────────
+        # Same derivation strategy as col G, but sourced from col J (Dep_yr25).
+        v_dep_yr25 = ws.cell(r, C_DEP_YR25).value
+        dep26_yr = None
+        if isinstance(v_dep_yr25, str) and v_dep_yr25.startswith('='):
+            dep26_yr = (_n8_next_wdv(v_dep_yr25)
+                        or (_n8_sum_col(v_dep_yr25, fl(C_DEP_YR25), fl(C_DEP_YR26))
+                            if 'SUM' in v_dep_yr25.upper() else None))
+        if dep26_yr:
+            c26 = ws.cell(r, C_DEP_YR26)
+            c26.value = dep26_yr
+            copy_style(ws.cell(r, C_DEP_YR25), c26)
+            c26.fill = PatternFill("solid", fgColor="FFFBEB")
+            c26.font = Font(size=9, color="856404")
+
+        # ── Col M: Dep as at 31.03.2026 = K + L ─────────────────────────────────
+        if dep25 is not None:
+            c26 = ws.cell(r, C_DEP_26)
+            if isinstance(dep25, str) and 'SUM' in dep25.upper():
+                c26.value = _n8_sum_col(dep25, fl(C_DEP_25), fl(C_DEP_26))
+            else:
+                c26.value = f'={fl(C_DEP_25)}{r}+{fl(C_DEP_YR26)}{r}'
+            copy_style(ws.cell(r, C_DEP_25), c26)
+            c26.fill = PatternFill("solid", fgColor="FFFBEB")
+            c26.font = Font(size=9, color="856404")
+
+        # ── Col N: Net Block as at 31.03.2026 = H - M ───────────────────────────
+        if nb25 is not None:
+            c26 = ws.cell(r, C_NB_26)
+            if isinstance(nb25, str) and 'SUM' in nb25.upper():
+                c26.value = _n8_sum_col(nb25, fl(C_NB_25), fl(C_NB_26))
+            else:
+                c26.value = f'={fl(C_GB_26)}{r}-{fl(C_DEP_26)}{r}'
+            copy_style(ws.cell(r, C_NB_25), c26)
+            c26.fill = PatternFill("solid", fgColor="FFFBEB")
+            c26.font = Font(size=9, color="856404")
+
+    # ── 8. Re-apply merges (with column remapping) ────────────────────────────────
+    for m in saved_merges:
+        new_sc = _n8_new_col(m['min_col'])
+        new_ec = _n8_new_col(m['max_col'])
+        try:
+            ws.merge_cells(
+                start_row=m['min_row'], start_column=new_sc,
+                end_row=m['max_row'],   end_column=new_ec
+            )
+            if m['val'] is not None:
+                ws.cell(m['min_row'], new_sc).value = m['val']
+        except Exception:
+            pass   # skip degenerate merge conflicts
+
+    # ── 9. Restore column widths (remapped) + set widths for new cols ─────────────
+    for letter, (width, hidden) in orig_dims.items():
+        new_c = _n8_new_col(column_index_from_string(letter))
+        ws.column_dimensions[get_column_letter(new_c)].width  = width
+        ws.column_dimensions[get_column_letter(new_c)].hidden = hidden
+    for col in (C_GB_ADD26, C_GB_26, C_DEP_YR26, C_DEP_26, C_NB_26):
+        ws.column_dimensions[get_column_letter(col)].width = 18
+
+    # ── 10. Update title dates ────────────────────────────────────────────────────
+    if update_titles:
+        for r in range(1, min(10, ws.max_row + 1)):
+            for c in range(1, ws.max_column + 1):
+                v = ws.cell(r, c).value
+                if isinstance(v, str):
+                    if '2024-25' in v:
+                        ws.cell(r, c).value = v.replace('2024-25', '2025-26')
+                    elif re.search(r'31st? March,? 2025', v):
+                        ws.cell(r, c).value = v.replace('2025', '2026')
+
+
+def _n8_is_hdr_row(ws, r):
+    """True if any cell in row r of Note 8 contains a period/date marker."""
+    for c in range(1, ws.max_column + 1):
+        if PERIOD_RE.search(str(ws.cell(r, c).value or '')):
+            return True
+    return False
+
+
+def _n8_hdr(ws, r, c, text):
+    """Write a styled column header cell in Note 8's new 2025-26 section."""
+    cell = ws.cell(r, c)
+    cell.value     = text
+    cell.font      = Font(bold=True, size=9, color="7A5200")
+    cell.fill      = PatternFill("solid", fgColor="FFF0C0")
+    cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
 
 
 # ══════════════════════════════════════════════════════════════

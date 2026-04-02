@@ -37,7 +37,7 @@ class Config:
         'Note 2':           {'insert': 4, 'width': 2},
         'Note  3-4':        {'insert': 4},
         'Note  5-7':        {'insert': 4},
-        'Note 8':           {'insert': 6},
+        'Note 8':           {'insert': 6, 'type': 'fixed_assets'},
         'Note 9-11':        {'insert': 4},
         'Note 11-14':       {'insert': 4},
         'Note To P & L':    {'insert': 3},
