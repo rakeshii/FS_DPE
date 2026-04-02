@@ -476,29 +476,34 @@ def shift_formula(formula, cur_insert, sheet_config=None):
 # DERIVE 2026 FORMULA - shift 2025 formula one column LEFT
 # ══════════════════════════════════════════════════════════════
 
-def derive_2026_formula(formula_2025, col_2025_1idx, sheet_config=None):
+def derive_2026_formula(formula_2025, col_2025_1idx, sheet_config=None,
+                        col_2026_1idx=None):
     """
     Derive the correct 2026 formula from the already-shifted 2025 formula.
 
-    Rule - shift every same-sheet column ref >= insert_col one position LEFT:
+    Rule - shift every same-sheet column ref >= col_2026 left by (col_2025 - col_2026):
       col_2025 refs  →  col_2026  (self-references)
       col_2024 refs  →  col_2025  (backward-looking refs like opening balance)
-      any col N >= insert_col  →  N-1
+
+    For regular sheets (width=1): col_2026 = col_2025 - 1  (shift by 1)
+    For wide sheets  (width=2):   col_2026 must be passed explicitly
+      e.g. Note 2 ₹ col: col_2025_amount=7(G), col_2026_amount=5(E) → shift by 2
 
     Cross-sheet refs to financial sheets: shift their 2025 col → their 2026 col
     Cross-sheet refs to support sheets (TB, COMPUTATION etc): unchanged
 
-    Examples:
+    Examples (regular sheet):
       2025 col E: =SUM(E9:E12)          → 2026 col D: =SUM(D9:D12)
       2025 col E: =+F13  (F=2024 col)   → 2026 col D: =+E13  (E=2025 col)
-      2025 col D: =+E34  (E=2024 col)   → 2026 col C: =+D34  (D=2025 col)
-      2025 col D: =+TB!C21              → 2026 col C: =+TB!C21  (TB unchanged)
+    Examples (Note 2 wide sheet, ₹ amount):
+      2025 col G: =SUM(G9:G12)          → 2026 col E: =SUM(E9:E12)  (shift by 2)
     """
     if not isinstance(formula_2025, str) or not formula_2025.startswith('='):
         return formula_2025
 
     cfg        = sheet_config or {}
-    insert_col = col_2025_1idx - 1   # insert_col == col_2026_1idx
+    insert_col = col_2026_1idx if col_2026_1idx is not None else (col_2025_1idx - 1)
+    step       = col_2025_1idx - insert_col   # how many cols to shift left (≥1)
 
     def _shift_cross(m):
         ref_sh = m.group(1) or m.group(2)
@@ -529,13 +534,11 @@ def derive_2026_formula(formula_2025, col_2025_1idx, sheet_config=None):
     def _shift_same(m):
         abs_c, col_ltr, row_part = m.group(1), m.group(2), m.group(3)
         cn = column_index_from_string(col_ltr)
-        # Shift ALL cols >= insert_col one step LEFT
-        # This correctly handles:
-        #   col_2025 → col_2026  (self-references)
-        #   col_2024 → col_2025  (backward-looking: opening = prev year closing)
-        #   any further-right col also shifts left by 1
+        # Shift ALL cols >= insert_col LEFT by `step`
+        # For width=1 sheets: step=1 (col_2025 → col_2026, col_2024 → col_2025)
+        # For width=2 sheets: step=2 (so Note 2 G→E, H→F, etc.)
         if cn >= insert_col:
-            col_ltr = get_column_letter(cn - 1)
+            col_ltr = get_column_letter(cn - step)
         return f"{abs_c}{col_ltr}{row_part}"
 
     result, last = [], 0
@@ -759,7 +762,8 @@ def process_wide_financial_sheet(ws, shname, insert_col, sheet_config,
         # 2026 No. of Shares col - formula if 2025 shares col has one, else blank
         if isinstance(v_shares, str) and v_shares.startswith('='):
             c26_sh = ws.cell(r, col_2026_shares)
-            c26_sh.value = derive_2026_formula(v_shares, col_2025_shares, sheet_config)
+            c26_sh.value = derive_2026_formula(
+                v_shares, col_2025_shares, sheet_config, col_2026_shares)
             copy_style(ws.cell(r, col_2025_shares), c26_sh)
             c26_sh.fill = PatternFill("solid", fgColor="FFFBEB")
             c26_sh.font = Font(size=9, color="856404")
@@ -767,7 +771,8 @@ def process_wide_financial_sheet(ws, shname, insert_col, sheet_config,
         # 2026 ₹ amount col - formula derived from 2025 ₹ col
         if isinstance(v_amount, str) and v_amount.startswith('='):
             c26_amt = ws.cell(r, col_2026_amount)
-            c26_amt.value = derive_2026_formula(v_amount, col_2025_amount, sheet_config)
+            c26_amt.value = derive_2026_formula(
+                v_amount, col_2025_amount, sheet_config, col_2026_amount)
             copy_style(ws.cell(r, col_2025_amount), c26_amt)
             c26_amt.fill = PatternFill("solid", fgColor="FFFBEB")
             c26_amt.font = Font(size=9, color="856404")
