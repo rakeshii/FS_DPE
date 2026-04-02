@@ -57,6 +57,16 @@ class Config:
         ('Note 11-14', 3, 2, "=+'Note 9-11'!B3:E3"),
         # BS D16: pre-shift formula so shift_formula produces ='Note 2'!E14
         ('BS',        16, 4, "='Note 2'!D14"),
+
+        # ── Note 8 cross-references (new col positions after 5-col restructure) ──
+        # Note 8 insert=6 → shift_formula adds +1 to any col ≥ 6.
+        # So orig_f K→L, M→N in the output.
+        # P&L D20: Depreciation for the year → Note 8 L27 (Dep for year 2025-26 total)
+        ('P & L',     20, 4, "='Note 8'!K27"),
+        # BS D29: Fixed Assets Net Block total → Note 8 N27 (NB 31.03.2026 total)
+        ('BS',        29, 4, "='Note 8'!M27"),
+        # BS D30: Fixed Assets sub-item → Note 8 N24 (NB 31.03.2026 row 24)
+        ('BS',        30, 4, "='Note 8'!M24"),
     ]
 
 
