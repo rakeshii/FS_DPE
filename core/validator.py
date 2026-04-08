@@ -8,7 +8,7 @@ import os
 
 
 # Minimum expected sheet names — at least these must be present
-REQUIRED_SHEETS = {'BS', 'P & L', 'CFS'}
+REQUIRED_SHEETS = {'BS', 'P&L', 'CFS'}
 
 # Max file size in bytes (20 MB)
 MAX_SIZE = 20 * 1024 * 1024
