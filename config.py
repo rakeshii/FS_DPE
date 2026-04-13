@@ -32,7 +32,7 @@ class Config:
     #    insert = column number where the new 2026 col is inserted
     SHEET_CONFIG = {
         'BS':               {'insert': 4},
-        'P & L':            {'insert': 4},
+        'P&L':              {'insert': 4},
         'CFS':              {'insert': 4},
         'Note 2':           {'insert': 4, 'width': 2},
         'Note  3-4':        {'insert': 4},
@@ -40,7 +40,7 @@ class Config:
         'Note 8':           {'insert': 6, 'type': 'fixed_assets'},
         'Note 9-11':        {'insert': 4},
         'Note 11-14':       {'insert': 4},
-        'Note To P & L':    {'insert': 3},
+        'Note To P&L':      {'insert': 3},
         'Details to notes': {'insert': 2},
     }
 
@@ -49,8 +49,8 @@ class Config:
     CHAIN_PATCHES = [
         ('Note 2',     2, 2, "=+'Note  3-4'!B2:E2"),
         ('Note 2',     3, 2, "=+'Note  3-4'!B3:E3"),
-        ('Note  3-4',  2, 2, "='P & L'!B2:E2"),
-        ('Note  5-7',  2, 2, "='P & L'!B2:E2"),
+        ('Note  3-4',  2, 2, "='P&L'!B2:E2"),
+        ('Note  5-7',  2, 2, "='P&L'!B2:E2"),
         ('Note 8',     4, 2, "=+'Note  5-7'!B37:E37"),
         ('Note 9-11',  2, 2, "=+'Note 8'!B4:E4"),
         ('Note 11-14', 2, 2, "=+'Note 9-11'!B2:E2"),
@@ -62,7 +62,7 @@ class Config:
         # Note 8 insert=6 → shift_formula adds +1 to any col ≥ 6.
         # So orig_f K→L, M→N in the output.
         # P&L D20: Depreciation for the year → Note 8 L27 (Dep for year 2025-26 total)
-        ('P & L',     20, 4, "='Note 8'!K27"),
+        ('P&L',     20, 4, "='Note 8'!K27"),
         # BS D29: Fixed Assets Net Block total → Note 8 N27 (NB 31.03.2026 total)
         ('BS',        29, 4, "='Note 8'!M27"),
         # BS D30: Fixed Assets sub-item → Note 8 N24 (NB 31.03.2026 row 24)
