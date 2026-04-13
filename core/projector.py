@@ -10,6 +10,10 @@ import openpyxl
 from openpyxl.utils import get_column_letter, column_index_from_string
 from openpyxl.styles import Font, PatternFill, Alignment
 
+from core.column_detector import detect_year_columns
+from core.template_validator import TemplateValidator
+from core.diagnostics import DiagnosticsReport, SheetRecord, create_update_report_sheet
+
 # ── Compiled regex (v8 cross-sheet range aware) ─────────────────
 FULL_RANGE_PAT = re.compile(
     r"(?:'([^']+)'|([A-Za-z][A-Za-z0-9_]*))!"
@@ -39,16 +43,28 @@ def freeze_2025_col_with_values(ws, col_2025, cached_values):
     - None/empty cells → kept as None
     This gives auditors the 2025 actual figures as plain numbers (no formulas),
     exactly matching the pattern of the 2024 column in the original file.
+
+    Returns
+    -------
+    (missing_count, missing_refs)
+        missing_count : int         — formula cells whose cached value was absent
+        missing_refs  : list[str]   — cell addresses e.g. ["R5C4", "R12C4"]
     """
+    missing_count = 0
+    missing_refs  = []
+
     for r in range(1, ws.max_row + 1):
         cell    = ws.cell(r, col_2025)
-        current = cell.value           # this is the shifted 2025 formula after insert
+        current = cell.value           # shifted 2025 formula after insert
         cached  = cached_values.get(r) # pre-computed result from data_only read
 
         if cached is None:
             # No cached value - keep whatever is there (header text, None)
             if isinstance(current, str) and current.startswith('='):
-                cell.value = None      # formula with no cached result → blank
+                # Formula cell with no cached result: keep the formula so auditors
+                # can calculate it, but log it so reviewers can verify.
+                missing_count += 1
+                missing_refs.append(f"R{r}C{col_2025}")
             continue
 
         if isinstance(cached, str) and PERIOD_RE.search(cached):
@@ -56,6 +72,38 @@ def freeze_2025_col_with_values(ws, col_2025, cached_values):
 
         # Write the computed value (number or text result)
         cell.value = cached
+
+    return missing_count, missing_refs
+
+
+# ══════════════════════════════════════════════════════════════
+# INTERNAL HELPERS FOR VALIDATION & DIAGNOSTICS
+# ══════════════════════════════════════════════════════════════
+
+def _run_template_validation(wb, sheet_config):
+    """
+    Run TemplateValidator against the loaded workbook.
+    Raises RuntimeError with a formatted report if any errors are found.
+    Warnings are attached to the report but do not block processing.
+    """
+    validator = TemplateValidator(sheet_config)
+    result    = validator.validate(wb)
+    if not result.passed:
+        raise RuntimeError(
+            "Template validation failed — the uploaded file structure does not "
+            "match the expected financial statements format.\n\n"
+            + result.format_report()
+        )
+    return result   # caller can inspect warnings
+
+
+def _count_formulas_in_col(ws, col):
+    """Count cells in column `col` (1-indexed) that contain a formula."""
+    return sum(
+        1 for r in range(1, ws.max_row + 1)
+        if isinstance(ws.cell(r, col).value, str)
+        and ws.cell(r, col).value.startswith('=')
+    )
 
 
 # ══════════════════════════════════════════════════════════════
@@ -65,7 +113,21 @@ def freeze_2025_col_with_values(ws, col_2025, cached_values):
 def generate_projection(input_path, output_path, sheet_config, chain_patches,
                         new_header='As at 31 March, 2026', copy_vals=True,
                         update_titles=True, lo_cmd='libreoffice', lo_timeout=90,
-                        named_ranges=None):
+                        named_ranges=None,
+                        enable_validation=True,
+                        enable_report=True):
+    """
+    Parameters (additions to existing v8 interface)
+    ------------------------------------------------
+    enable_validation : bool
+        When True (default), run TemplateValidator before processing.
+        Raises RuntimeError if any core sheet fails validation, so the caller
+        receives a structured error message instead of a partially-wrong output.
+    enable_report : bool
+        When True (default), append an 'Update Report' sheet to the output
+        workbook documenting every column-detection and formula-migration
+        decision made during this run.
+    """
     xlsx_path = _ensure_xlsx(input_path, lo_cmd, lo_timeout)
     try:
         # Step 1: Read cached formula results (data_only) BEFORE modifying anything
@@ -88,33 +150,118 @@ def generate_projection(input_path, output_path, sheet_config, chain_patches,
                     cached[shname + '_col2'][r] = ws_d.cell(r, col + 1).value
         wb_data.close()
 
-        # Step 2: Load for editing, process all sheets
+        # Step 2: Load for editing, optionally validate, process all sheets
         wb = openpyxl.load_workbook(xlsx_path, keep_links=False)
+
+        # ── Template validation (raises RuntimeError on structural errors) ──
+        validation_result = None
+        if enable_validation:
+            validation_result = _run_template_validation(wb, sheet_config)
+
+        # ── Diagnostics accumulator ─────────────────────────────────────────
+        diag = DiagnosticsReport(new_header=new_header) if enable_report else None
+
+        # Carry validation warnings into the report
+        if diag and validation_result:
+            for issue in validation_result.warnings():
+                diag.global_warnings.append(str(issue))
+
         for shname in wb.sheetnames:
             cfg = sheet_config.get(shname)
             if cfg:
                 sheet_type = cfg.get('type', 'standard')
                 width      = cfg.get('width', 1)
+                insert     = cfg['insert']
+
+                # ── Column detection (for diagnostics / mismatch warning) ──
+                if sheet_type != 'fixed_assets':
+                    det = detect_year_columns(wb[shname], sheet_type=sheet_type)
+                    eff_insert = det.current_year_col if not det.error else insert
+                else:
+                    det        = None
+                    eff_insert = insert
+
                 if sheet_type == 'fixed_assets':
                     # Fixed Assets Schedule: dedicated 5-column 2025-26 insertion.
                     # Existing 2024-25 data stays as-is; new cols get live formulas.
                     process_note8_sheet(wb[shname], sheet_config, new_header, update_titles)
+                    if diag:
+                        diag.add(SheetRecord(
+                            sheet_name           = shname,
+                            sheet_type           = 'fixed_assets',
+                            config_insert_col    = insert,
+                            detected_insert_col  = insert,
+                            detection_confidence = 1.0,
+                            current_year         = 0,
+                            new_year_col         = 7,    # col G — first new col in Note 8
+                            frozen_year_col      = insert,
+                            formulas_copied      = _count_formulas_in_col(wb[shname], 7),
+                        ))
+
                 elif width == 2:
                     # Wide sheet: insert 2 cols, 2026 gets No.of Shares + ₹ formula cols
-                    process_wide_financial_sheet(wb[shname], shname, cfg['insert'],
+                    process_wide_financial_sheet(wb[shname], shname, insert,
                                                  sheet_config, new_header, update_titles)
                     # Freeze 2025 sub-cols (now shifted right by 2)
-                    freeze_2025_col_with_values(wb[shname], cfg['insert'] + 2,
-                                                cached.get(shname, {}))
-                    freeze_2025_col_with_values(wb[shname], cfg['insert'] + 3,
-                                                cached.get(shname + '_col2', {}))
+                    mc1, mr1 = freeze_2025_col_with_values(
+                        wb[shname], insert + 2, cached.get(shname, {}))
+                    mc2, mr2 = freeze_2025_col_with_values(
+                        wb[shname], insert + 3, cached.get(shname + '_col2', {}))
+                    if diag:
+                        rec_warns = []
+                        if det and det.warnings:
+                            rec_warns.extend(det.warnings)
+                        if det and det.current_year_col != insert:
+                            rec_warns.append(
+                                f"Detected col {get_column_letter(det.current_year_col)} "
+                                f"differs from config insert={insert}."
+                            )
+                        diag.add(SheetRecord(
+                            sheet_name           = shname,
+                            sheet_type           = 'wide',
+                            config_insert_col    = insert,
+                            detected_insert_col  = eff_insert,
+                            detection_confidence = det.confidence if det else 1.0,
+                            current_year         = det.current_year if det else 0,
+                            new_year_col         = insert,
+                            frozen_year_col      = insert + 2,
+                            formulas_copied      = _count_formulas_in_col(wb[shname], insert + 1),
+                            missing_cache_cells  = mc1 + mc2,
+                            missing_cache_refs   = mr1 + mr2,
+                            warnings             = rec_warns,
+                        ))
+
                 else:
-                    process_financial_sheet(wb[shname], shname, cfg['insert'],
+                    process_financial_sheet(wb[shname], shname, insert,
                                             sheet_config, new_header, copy_vals, update_titles)
-                    freeze_2025_col_with_values(wb[shname], cfg['insert'] + 1,
-                                                cached.get(shname, {}))
+                    mc, mr = freeze_2025_col_with_values(
+                        wb[shname], insert + 1, cached.get(shname, {}))
+                    if diag:
+                        rec_warns = []
+                        if det and det.warnings:
+                            rec_warns.extend(det.warnings)
+                        if det and det.current_year_col != insert:
+                            rec_warns.append(
+                                f"Detected col {get_column_letter(det.current_year_col)} "
+                                f"differs from config insert={insert}."
+                            )
+                        diag.add(SheetRecord(
+                            sheet_name           = shname,
+                            sheet_type           = 'standard',
+                            config_insert_col    = insert,
+                            detected_insert_col  = eff_insert,
+                            detection_confidence = det.confidence if det else 1.0,
+                            current_year         = det.current_year if det else 0,
+                            new_year_col         = insert,
+                            frozen_year_col      = insert + 1,
+                            formulas_copied      = _count_formulas_in_col(wb[shname], insert),
+                            missing_cache_cells  = mc,
+                            missing_cache_refs   = mr,
+                            warnings             = rec_warns,
+                        ))
             else:
                 process_support_sheet(wb[shname], sheet_config)
+
         _apply_chain_patches(wb, sheet_config, chain_patches)
 
         # Create Named Ranges in the workbook for all TB row references
@@ -124,6 +271,11 @@ def generate_projection(input_path, output_path, sheet_config, chain_patches,
 
         # Create year-end checklist sheet
         create_checklist_sheet(wb, sheet_config, named_ranges)
+
+        # Create Update Report sheet (audit trail for this run)
+        if diag:
+            create_update_report_sheet(wb, diag)
+
         wb.save(output_path)
     finally:
         if xlsx_path != input_path and os.path.exists(xlsx_path):
