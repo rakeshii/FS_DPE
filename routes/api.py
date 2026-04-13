@@ -94,9 +94,14 @@ def generate():
         )
 
     except RuntimeError as e:
-        # Catches LibreOffice not found, conversion failures, etc.
+        # Catches LibreOffice not found, conversion failures, template validation errors
         msg = str(e)
-        status = 503 if 'LibreOffice' in msg else 500
+        if 'Template validation failed' in msg:
+            status = 422   # Unprocessable Entity — file structure doesn't match template
+        elif 'LibreOffice' in msg:
+            status = 503
+        else:
+            status = 500
         return jsonify({'error': msg}), status
 
     except Exception as e:
