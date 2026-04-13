@@ -37,12 +37,12 @@ class TestShiftFormula:
         assert shift_formula('=+D39-D25', 4, SHEET_CONFIG) == '=+E39-E25'
 
     def test_cross_sheet_single_cell(self):
-        result = shift_formula("='Note To P & L'!C13", 4, SHEET_CONFIG)
-        assert result == "='Note To P & L'!D13"
+        result = shift_formula("='Note To P&L'!C13", 4, SHEET_CONFIG)
+        assert result == "='Note To P&L'!D13"
 
     def test_cross_sheet_note_3_4(self):
-        result = shift_formula("=+'P & L'!D29", 4, SHEET_CONFIG)
-        assert result == "=+'P & L'!E29"
+        result = shift_formula("=+'P&L'!D29", 4, SHEET_CONFIG)
+        assert result == "=+'P&L'!E29"
 
     def test_cross_sheet_range_end_col_preserved(self):
         """Key v8 fix: TB!C102:C106 — end col must NOT become D106."""
@@ -66,8 +66,8 @@ class TestShiftFormula:
 
     def test_note_to_pl_tb_range_not_corrupted(self):
         """The user-reported formula that triggered v8 fix."""
-        formula  = "=SUM(TB!B102:B106)-SUM(TB!C102:C106)-'P & L'!D16"
-        expected = "=SUM(TB!B102:B106)-SUM(TB!C102:C106)-'P & L'!E16"
+        formula  = "=SUM(TB!B102:B106)-SUM(TB!C102:C106)-'P&L'!D16"
+        expected = "=SUM(TB!B102:B106)-SUM(TB!C102:C106)-'P&L'!E16"
         result   = shift_formula(formula, 3, SHEET_CONFIG)
         assert result == expected
 
@@ -141,7 +141,7 @@ class TestCopyValsFlag:
         ws['D3'] = '=SUM(D9:D12)'
         ws['E3'] = '=SUM(E9:E12)'
 
-        return wb, ws
+        return ws, wb
 
     def _run(self, copy_vals):
         import openpyxl, tempfile, os
@@ -150,7 +150,7 @@ class TestCopyValsFlag:
         wb, ws = self._make_sheet()
         cfg = {
             'BS': {'insert': 4},
-            'P & L': {'insert': 4},
+            'P&L': {'insert': 4},
         }
         # insert_col=4 (1-indexed = col D)
         process_financial_sheet(
@@ -192,6 +192,198 @@ class TestCopyValsFlag:
         """The 2026 header cell must always appear even when copy_vals=False."""
         ws = self._run(copy_vals=False)
         assert ws.cell(1, 4).value == 'As at 31 March, 2026'
+
+# ══════════════════════════════════════════════════════════════
+# column_detector tests
+# ══════════════════════════════════════════════════════════════
+
+class TestDetectYearColumns:
+    """Tests for core/column_detector.py"""
+
+    def _make_ws(self, header_col=4, header_text='As at 31 March, 2025',
+                 num_rows=30, num_cols=6):
+        """Build a minimal worksheet with a year header and numeric data."""
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, header_col, header_text)
+        ws.cell(1, header_col + 1, 'As at 31 March, 2024')
+        # Fill data rows with numbers in both year cols
+        for r in range(2, num_rows + 1):
+            ws.cell(r, header_col,     float(r * 1000))
+            ws.cell(r, header_col + 1, float(r * 900))
+        # Label column
+        for r in range(2, num_rows + 1):
+            ws.cell(r, 1, f'Account line item {r}')
+        return ws
+
+    def test_detects_correct_year_col(self):
+        from core.column_detector import detect_year_columns
+        ws = self._make_ws(header_col=4)
+        result = detect_year_columns(ws)
+        assert result.current_year_col == 4
+
+    def test_detects_year_number(self):
+        from core.column_detector import detect_year_columns
+        ws = self._make_ws(header_col=4, header_text='As at 31 March, 2025')
+        result = detect_year_columns(ws)
+        assert result.current_year == 2025
+
+    def test_confidence_above_threshold(self):
+        from core.column_detector import detect_year_columns
+        ws = self._make_ws(header_col=4)
+        result = detect_year_columns(ws)
+        assert result.confidence >= 0.40
+        assert result.error is None
+
+    def test_no_year_header_returns_error(self):
+        """Sheet with no period header should get an error result."""
+        import openpyxl
+        from core.column_detector import detect_year_columns
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 1, 'Description')
+        ws.cell(1, 2, 'Amount')
+        for r in range(2, 10):
+            ws.cell(r, 2, float(r))
+        result = detect_year_columns(ws)
+        assert result.error is not None
+
+    def test_preceding_year_col_is_right_of_current(self):
+        from core.column_detector import detect_year_columns
+        ws = self._make_ws(header_col=4)
+        result = detect_year_columns(ws)
+        assert result.preceding_year_col == result.current_year_col + 1
+
+    def test_label_column_not_chosen_as_year_col(self):
+        """Column A is a text label column and must not be selected."""
+        from core.column_detector import detect_year_columns
+        ws = self._make_ws(header_col=4)
+        result = detect_year_columns(ws)
+        assert result.current_year_col > 1   # never col A
+
+
+# ══════════════════════════════════════════════════════════════
+# template_validator tests
+# ══════════════════════════════════════════════════════════════
+
+class TestTemplateValidator:
+    """Tests for core/template_validator.py"""
+
+    def _make_wb_with_core_sheets(self, year_col=4):
+        """Minimal workbook with BS, P&L, CFS sheets."""
+        import openpyxl
+        wb = openpyxl.Workbook()
+        # Remove default sheet
+        wb.remove(wb.active)
+        for name in ('BS', 'P&L', 'CFS'):
+            ws = wb.create_sheet(name)
+            ws.cell(1, year_col, 'As at 31 March, 2025')
+            ws.cell(1, year_col + 1, 'As at 31 March, 2024')
+            for r in range(2, 25):
+                ws.cell(r, year_col,     float(r * 1000))
+                ws.cell(r, year_col + 1, float(r * 900))
+        return wb
+
+    def test_valid_workbook_passes(self):
+        from core.template_validator import TemplateValidator
+        wb     = self._make_wb_with_core_sheets(year_col=4)
+        result = TemplateValidator(SHEET_CONFIG).validate(wb)
+        assert result.passed
+        assert len(result.errors()) == 0
+
+    def test_missing_required_sheet_fails(self):
+        from core.template_validator import TemplateValidator
+        import openpyxl
+        wb = openpyxl.Workbook()
+        wb.active.title = 'BS'
+        # P&L and CFS missing
+        result = TemplateValidator(SHEET_CONFIG).validate(wb)
+        assert not result.passed
+        error_sheets = {e.sheet for e in result.errors()}
+        assert 'P&L' in error_sheets
+        assert 'CFS' in error_sheets
+
+    def test_missing_period_header_is_error_for_core_sheet(self):
+        from core.template_validator import TemplateValidator
+        import openpyxl
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        for name in ('BS', 'P&L', 'CFS'):
+            ws = wb.create_sheet(name)
+            ws.cell(1, 1, 'Description')   # no period header
+            for r in range(2, 10):
+                ws.cell(r, 4, float(r))
+        result = TemplateValidator({'BS': {'insert': 4},
+                                    'P&L': {'insert': 4},
+                                    'CFS': {'insert': 4}}).validate(wb)
+        assert not result.passed
+
+    def test_column_mismatch_is_warning_not_error(self):
+        """When detected col differs from config, it should be a warning only."""
+        from core.template_validator import TemplateValidator
+        wb     = self._make_wb_with_core_sheets(year_col=5)   # actual col is 5
+        cfg    = {'BS': {'insert': 4},                         # config says 4
+                  'P&L': {'insert': 4},
+                  'CFS': {'insert': 4}}
+        result = TemplateValidator(cfg).validate(wb)
+        # Mismatch is a warning, not a fatal error
+        assert len(result.warnings()) > 0
+        assert any('differs' in w.reason or 'insert' in w.reason
+                   for w in result.warnings())
+
+    def test_format_report_contains_error_summary(self):
+        from core.template_validator import TemplateValidator
+        import openpyxl
+        wb     = openpyxl.Workbook()
+        wb.active.title = 'BS'
+        result = TemplateValidator(SHEET_CONFIG).validate(wb)
+        report = result.format_report()
+        assert 'VALIDATION FAILED' in report
+
+
+# ══════════════════════════════════════════════════════════════
+# freeze_2025_col_with_values return value tests
+# ══════════════════════════════════════════════════════════════
+
+class TestFreezeReturnValue:
+    """freeze_2025_col_with_values now returns (missing_count, missing_refs)."""
+
+    def test_no_missing_cache(self):
+        import openpyxl
+        from core.projector import freeze_2025_col_with_values
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 4, '=SUM(D2:D10)')
+        ws.cell(2, 4, 1000.0)
+        cached = {1: 5000.0, 2: 1000.0}
+        count, refs = freeze_2025_col_with_values(ws, 4, cached)
+        assert count == 0
+        assert refs == []
+
+    def test_missing_cache_counted(self):
+        import openpyxl
+        from core.projector import freeze_2025_col_with_values
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 4, '=SUM(D2:D5)')   # formula
+        ws.cell(2, 4, '=D3+D4')         # formula
+        # cached has no entry for rows 1 and 2
+        count, refs = freeze_2025_col_with_values(ws, 4, {})
+        assert count == 2
+        assert 'R1C4' in refs
+        assert 'R2C4' in refs
+
+    def test_period_header_not_counted_as_missing(self):
+        import openpyxl
+        from core.projector import freeze_2025_col_with_values
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 4, 'As at 31 March, 2025')   # period header, not a formula
+        cached = {}   # no cached values
+        count, refs = freeze_2025_col_with_values(ws, 4, cached)
+        assert count == 0
+
 
 # ══════════════════════════════════════════════════════════════
 # Run directly
